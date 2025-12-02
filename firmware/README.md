@@ -1,0 +1,4 @@
+# Firmware version
+- `TL-WR841Nv14_EU.bin`: original firmware (https://www.tp-link.com/it/support/download/tl-wr841n/#Firmware)
+- `firmware/new-firmware.bin`: the modified firmware with a `.js` file which send an alert when login into web interface. This version IS NOT stripped and contain the U-Boot section. Use this file only if you update the firmware through web interface. 
+- `firmware/new-firmware-stripped.bin`: the modified firmware with a `.js` file which send an alert when login into web interface. This version IS stripped and doesn't contain the U-Boot section. Use this file only if you update the firmware through the TFTP server. 
