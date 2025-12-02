@@ -4,6 +4,7 @@
 Abbiamo recuperato il frimware dal sito ufficiale TP-Link: https://www.tp-link.com/it/support/download/tl-wr841n/#Firmware. La versione del firmware è specifica per il modello riportato e la versione hardware corrispondente. È necessario scaricare il firmware adeguato in base alla regione di provenienza del router, nel nostro caso EU. 
 
 Abbiamo estratto il firmware con `binwalk3` per analizzarne la struttura. 
+
 ![Binwalk3 extraction](imgs/binwalk3_extraction.png)
 
 Per l'estrazione del firmware è possibile utilizzare anche `firmware-mod-kit` che è un tool più ampio il quale include `binwalk`. Tramite `firmware-mod-kit` è possibile anche ri-buildare il firmware dopo averlo modificato. 
@@ -16,16 +17,21 @@ Sono state esplorate due modalità di flash del firmware:
 Per flashare correttamente il firmware tramite l'interfaccia web di default del router TP-Link è necessario fornire una versione del firmware corretta. Per verificare il funzionamento della tool-chain abbiamo estratto il firmware tramite `firmware-mod-kit`. 
 ![FMK extract](imgs/fmk-extraction.png)
 Per verificare che il firmware flashato fosse quello custom abbiamo modificato il file `rootfs/web/index.htm` aggiungendo lo script `rootfs/web/js/test.js`:
+
 ![Index.htm](imgs/index-htm.png)
+
 ![Test.js](imgs/test-js.png)
 
 Abbiamo re-buildato il firmware tramite `firmware-mod-kit` per verificare che il tool generasse un firmware valido e accettato dal sistema di update. 
+
 ![FMK rebuild](imgs/fmk-rebuild.png)
 
 Una volta ottenuto il firmware re-buildato, abbiamo provato a fornire in input all'interfaccia web del router il file `.bin` per verificare che l'update venisse eseguito con successo.
+
 ![Firmware upload](imgs/firmware-test-upload.png)
 
 Una volta completato il flash del firmware il router si è riavviato autonomamente e dopo aver eseguito il login il risultato è stato il seguente:
+
 ![Alert](imgs/alert.png)
 
 In questo modo siamo riusciti a verificare che `firmware-mod-kit` riuscisse a buildare correttamente il firmware a partire dal `rootfs` ottenuto dal `.bin` originale.
