@@ -1,0 +1,9 @@
+buildroot/*
+!buildroot/env.sh
+!buildroot/Makefile*
+code/*
+!code/*.c
+.idea/
+.idea/*
+FirmwareModUtils/.idea
+FirmwareModUtils/.idea/*
