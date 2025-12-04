@@ -9,7 +9,10 @@ We unpacked the firmware with `binwalk3` to inspect its structure.
 
 ![Binwalk extraction](imgs/binwalk3_extraction.png)
 
-You can also use the `firmware-mod-kit` (FMK) suite, which includes `binwalk` and provides utilities to rebuild firmware after modifications. Firmware can be emulated with `qemu`, but qemu-based emulation often requires workarounds and may not fully emulate shared memory, so results can be incomplete. When the physical device is available we prefer to test directly on hardware.
+You can also use the `firmware-mod-kit` (FMK) suite, which includes `binwalk` and provides utilities to rebuild firmware 
+after modifications. Firmware can be emulated with `qemu`, but qemu-based emulation often requires workarounds and may 
+have issues emulating shared memory and will not emulate proprietary hardware interfaces, so results can be incomplete. 
+Thus, we chose to test on the physical device.
 
 We explored two flashing methods:
 - Using the router's default web interface
@@ -17,7 +20,10 @@ We explored two flashing methods:
 
 ## Web interface flash
 
-To flash a custom image from the router web interface you must provide a firmware file that the bootloader and the web update mechanism accept. To validate our toolchain we unpacked the firmware with `firmware-mod-kit`, modified the web UI in the extracted `rootfs` (for example by editing `rootfs/web/index.htm` and adding `rootfs/web/js/test.js`), and rebuilt the image using FMK.
+To flash a custom image from the router web interface you must provide a firmware file that the web update mechanism will accept.
+To validate that the firmware extraction was successful we unpacked the firmware with `firmware-mod-kit`, modified the 
+web UI in the extracted `rootfs` (for example by editing `rootfs/web/index.htm` and adding `rootfs/web/js/test.js`),
+and rebuilt the image using FMK.
 
 ![FMK extract](imgs/fmk-extraction.png)
 ![Index.htm](imgs/index-htm.png)
@@ -33,7 +39,9 @@ This verified that `firmware-mod-kit` can rebuild a valid firmware image startin
 
 ## TFTP recovery flash
 
-If the web interface is not available (for example after a brick or during a bootloop), you can force a flash using a TFTP server. Place a firmware file with the correct filename in the TFTP server root, force the device into recovery mode, and the router will pull the file and flash it. For the `V14` hardware the recovery filename is `tp_recovery.bin`.
+If the web interface is not available (for example after a brick or during a bootloop), you can force a flash using a
+TFTP server. Place a firmware file with the correct filename in the TFTP server root, force the device into recovery mode,
+and the router will pull the file and flash it. For the `V14` hardware the recovery filename is `tp_recovery.bin`.
 
 ### Install TFTP server on Fedora
 
