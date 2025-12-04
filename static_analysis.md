@@ -99,6 +99,12 @@ sudo tcpdump -ni <eth> port 69
 
 After the flash completes the device reboots and the web interface should be available at `192.168.0.1`.
 
+Il file `scripts/tftp_server.sh` automatizza il processo di setup del server tftp e la predisposizione dell'interfaccia, indirizzo IP e file di recovery. Quando lo script viene eseguito, dopo aver predisposto l'ambiente, esegue `tcpdump` sull'interfaccia specificata e quando viene interrotto con la combinazione `Ctrl+c` ripristina l'ambiente reimpostando le modalità di firewall e SELinux, e eliminando le directory non più necessarie.
+Modalità di utilizzo:
+```
+./tftp_server.sh <interfaccia_di_rete> <firmware.bin>
+```
+
 ### Note: stripped firmware
 Unlike the web-update process, TFTP recovery usually expects a stripped firmware image without the boot image. To create a recovery file from a rebuilt firmware you can use:
 
