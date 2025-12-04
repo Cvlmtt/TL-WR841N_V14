@@ -107,8 +107,13 @@ sudo tcpdump -ni <eth> port 69
 
 After the flash completes the device reboots and the web interface should be available at `192.168.0.1`.
 
-Il file `scripts/tftp_server.sh` automatizza il processo di setup del server tftp e la predisposizione dell'interfaccia, indirizzo IP e file di recovery. Quando lo script viene eseguito, dopo aver predisposto l'ambiente, esegue `tcpdump` sull'interfaccia specificata e quando viene interrotto con la combinazione `Ctrl+c` ripristina l'ambiente reimpostando le modalità di firewall e SELinux, e eliminando le directory non più necessarie.
-Modalità di utilizzo:
+The file `scripts/tftp_server.sh` automates the setup process of the TFTP server and the configuration of the interface,
+IP address, and recovery files. When the script is executed, after setting up the environment, it runs `tcpdump` on the
+specified interface. When interrupted using `Ctrl+c`, it restores the environment by resetting the firewall and SELinux 
+modes and removing any unnecessary directories.
+
+Usage:
+
 ```
 ./tftp_server.sh <interfaccia_di_rete> <firmware.bin>
 ```
