@@ -1,0 +1,14 @@
+services:
+  c2-server:
+    build: ./server
+    container_name: c2-server  # Solo il server ha nome fisso
+    ports:
+      - "4444:4444"
+    stdin_open: true
+    tty: true
+
+  c2-client:
+    build: ./client
+    # RIMUOVI container_name! Docker genererà c2-client-1, c2-client-2, ecc.
+    depends_on:
+      - c2-server
