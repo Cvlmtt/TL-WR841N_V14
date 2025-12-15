@@ -21,7 +21,7 @@ docker run --rm --network c2_docker_test_default alpine nc -zv c2-server 4444 2>
 
 echo ""
 echo "6. Avviando i client (uno alla volta per test)..."
-for i in {1..100}; do  # Prima solo 3 client per test
+for i in {1..4}; do  # Prima solo 3 client per test
     echo "   Avvio client-$i..."
     docker compose up -d --build --scale c2-client=$i
     sleep 2
