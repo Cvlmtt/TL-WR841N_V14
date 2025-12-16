@@ -28,7 +28,8 @@ class C2Server:
     def start(self, ui):
         if not getattr(ui, "handles_logs", False):
             threading.Thread(target=self.logger.printer, daemon=True).start()
-            threading.Thread(target=heartbeat_sender, args=(self,), daemon=True).start()
+            
+        threading.Thread(target=heartbeat_sender, args=(self,), daemon=True).start()
 
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
