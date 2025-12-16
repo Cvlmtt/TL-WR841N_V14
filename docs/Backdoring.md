@@ -13,7 +13,6 @@ The remainder of this section shows how we analyzed, corrected, and re‑enginee
 predictable and standards‑compliant variant, ultimately integrating it into the firmware modification workflow outlined 
 below.
 
-
 ## First idea: Scavanging GitHub
 Our initial approach consisted of surveying publicly available implementations of lightweight backdoors suitable for 
 embedded systems. The goal was to adopt an existing solution wholesale.
@@ -79,6 +78,7 @@ failed to properly initialize its network structures, and omitted common practic
 Some of its data‑structure sizes were mismatched, and certain resources were even released more than once. Altogether,
 these issues reflected a quick demonstration rather than a robust implementation and motivated a more disciplined rewrite 
 for our experimental environment.
+
 ## Patching the Code
 After identifying the deficiencies present in the original backdoor implementation, we undertook a systematic refactoring of the program to correct its structural and operational flaws. The resulting revision, which we refer to as `backdoor_V2.c`, incorporates proper error checking, process‑management hygiene, and safer socket-handling practices. For completeness, the improved version of the code is included below:
 ```C
