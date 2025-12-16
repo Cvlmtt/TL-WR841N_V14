@@ -16,7 +16,7 @@ def run_console(server: C2Server):
                 server.running = False
                 break
 
-            elif cmd.startswith("list "):
+            elif cmd.startswith("list"):
                 server.list_command()
                 
             elif cmd.startswith("broadcast "):
