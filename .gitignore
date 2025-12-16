@@ -7,3 +7,4 @@ code/*
 .idea/*
 FirmwareModUtils/.idea
 FirmwareModUtils/.idea/*
+*/__pycache__/*
