@@ -16,17 +16,9 @@ def run_console(server: C2Server):
                 server.running = False
                 break
 
-            elif cmd == "list":
-                with server.lock:
-                    for c in server.clients.values():
-                        with c.lock:
-                            state = "ACTIVE" if c.active else "INACTIVE"
-                            idle = int(time.time() - c.last_seen)
-                            print(
-                                f"{c.unique_id} -> {c.ip}:{c.port} "
-                                f"{state} idle:{idle}s"
-                            )
-
+            elif cmd.startswith("list "):
+                server.list_command()
+                
             elif cmd.startswith("broadcast "):
                 command = cmd[len("broadcast "):]
                 server.broadcast_command(command)
