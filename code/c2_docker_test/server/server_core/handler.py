@@ -75,22 +75,33 @@ def handle_client(server, client_socket, address):
             try:
                 data = sock.recv(8192)
                 if not data:
+                    server.log(f"[-] Client {client_obj.unique_id[:8]}... disconnected gracefully.")
                     break
 
                 output = data.decode(errors='ignore').rstrip()
-                server.log(f"[{client_obj.unique_id[:8]}...] {output[:200]}")
-                client_obj.set_time(time.time())
+                
+                # Format output for RichLog
+                log_message = (
+                    f"[b]Response from {client_obj.unique_id[:8]}[/b] ({client_obj.ip}):\n"
+                    f"```\n"
+                    f"{output}\n"
+                    f"```"
+                )
+                server.log(log_message)
+                
+                with client_obj.lock:
+                    client_obj.set_time(time.time())
 
             except socket.timeout:
                 continue
-            except Exception:
+            except (socket.error, OSError) as e:
+                server.log(f"[!] Socket error with {client_obj.unique_id[:8]}: {e}")
+                break
+            except Exception as e:
+                server.log(f"[!] Unexpected error in client loop {client_obj.unique_id[:8]}: {e}")
                 break
 
     finally:
         if client_obj:
             client_obj.close()
-        try:
-            client_socket.close()
-        except:
-            pass
-        server.log(f"[-] Connection closed {client_id}")
+        server.log(f"[-] Connection closed for {client_id}")

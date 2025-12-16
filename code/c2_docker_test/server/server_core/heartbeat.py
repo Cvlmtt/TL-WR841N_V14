@@ -23,11 +23,10 @@ def heartbeat_sender(server):
                 try:
                     msg = f"HEARTBEAT|{ip}|{int(time.time())}"
                     hb_socket.sendto(msg.encode(), (ip, port))
+                    client.set_time(time.time())
                 except Exception as e:
                     server.log(f"[!] Heartbeat failed to {ip}:{port} ({client.unique_id[:8]}...): {e}")
                     failed.append(client)
-                with client.lock:
-                    client.set_time(time.time())
 
             for client in failed:
                 client.close()

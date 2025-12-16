@@ -13,6 +13,8 @@ class Client:
         self.last_seen = last_seen
         self.unique_id = unique_id
         self.heartbeat_port = heartbeat_port
+        self.first_seen = time.time()
+        self.note = ""
 
         self.active = True
         self.lock = threading.Lock()

