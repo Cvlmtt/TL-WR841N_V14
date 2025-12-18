@@ -13,15 +13,24 @@
 #include <time.h>
 #include <ctype.h>
 #include <fcntl.h>  // Added for fcntl
+#include <poll.h>
 
 /* Define MSG_NOSIGNAL if not present (uClibc) */
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
-#define SERVER_IP "192.168.1.79"
+#define SERVER_IP "10.96.45.29"
 #define COMMAND_PORT 4444
 #define HEARTBEAT_TIMEOUT 60
 #define MAX_RETRIES 0
+#define PUSH_SOCK_ERROR (-1)
+
+#ifndef LOCAL
+#define POLL_TIMEOUT 15
+#else
+#define POLL_TIMEOUT 500
+#endif
+
 
 volatile sig_atomic_t keep_running = 1;
 char CLIENT_ID[33] = {0};
@@ -38,29 +47,81 @@ static unsigned long get_monotonic_time(void) {
         return counter++;
     }
 }
+// If ret 0 socket is clean if 1 something went wrong, you have to decide
+// Timeout lan:15ms, wan 500ms
+int drain_socket_unknown_size(int sock, int timeout_ms) {
+    char buf[1024];
+    struct pollfd pfd;
+    pfd.fd = sock;
+    pfd.events = POLLIN;
 
-void handle_push_command(int sock, char *cmd, int bytes_read) {
+    while (1) {
+        int pr = poll(&pfd, 1, timeout_ms);
+        if (pr == 0) {
+            // timeout: no data coming in
+            return 0;
+        }
+        if (pr < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (pfd.revents & POLLIN) {
+            ssize_t n = recv(sock, buf, sizeof(buf), 0);
+
+            if (n > 0) continue;
+
+            if (n == 0) {
+                // peer closed (local socket not yet open)
+                return -1;
+            }
+
+            if (errno == EINTR) continue;
+
+            return -1;
+        }
+
+        // Strange events: POLLERR, POLLHUP, ecc.
+        return -1;
+    }
+}
+
+void print_hex(const unsigned char *buf, size_t n)
+{
+    if (!buf || n == 0) return;
+
+    for (size_t i = 0; i < n; i++) {
+        printf("%02X ", buf[i]);
+        /* opzionale: a capo ogni 16 byte */
+        if ((i + 1) % 16 == 0) printf("\n");
+    }
+    if (n % 16 != 0) printf("\n");
+}
+
+int handle_push_command(int sock, char *cmd, int bytes_read) {
     char dest_path[256];
     long file_size;
 
-    char *header_end = strstr(cmd, "\n");
+    print_hex(cmd, 150);
+
+    char *header_end = memchr(cmd, 0x0A, bytes_read);
     if (!header_end) {
         fprintf(stderr, "[!] Malformed PUSH command header.\n");
-        return;
+        return PUSH_SOCK_ERROR;
     }
-    *header_end = '\0'; // Null-terminate the header part
+    *header_end = '\0';
 
     char *p = cmd + 5; // Skip "PUSH|"
     char *sep = strchr(p, '|');
     if (!sep) {
         fprintf(stderr, "[!] Invalid PUSH command format.\n");
-        return;
+        return PUSH_SOCK_ERROR;
     }
 
     size_t path_len = sep - p;
     if (path_len >= sizeof(dest_path)) {
         fprintf(stderr, "[!] Destination path too long.\n");
-        return;
+        return PUSH_SOCK_ERROR;
     }
     strncpy(dest_path, p, path_len);
     dest_path[path_len] = '\0';
@@ -68,7 +129,7 @@ void handle_push_command(int sock, char *cmd, int bytes_read) {
     file_size = atol(sep + 1);
     if (file_size <= 0) {
         fprintf(stderr, "[!] Invalid file size.\n");
-        return;
+        return PUSH_SOCK_ERROR;
     }
 
     printf("[*] Receiving file '%s' (%ld bytes)...\n", dest_path, file_size);
@@ -79,7 +140,7 @@ void handle_push_command(int sock, char *cmd, int bytes_read) {
         // Consume the rest of the file from the socket to avoid desync
         long remaining_to_consume = file_size;
         char dummy[1024];
-        
+
         // Consume what's already in the buffer
         long initial_content_len = bytes_read - (header_end + 1 - cmd);
         if(initial_content_len > 0) {
@@ -87,41 +148,51 @@ void handle_push_command(int sock, char *cmd, int bytes_read) {
         }
 
         while (remaining_to_consume > 0) {
-            long to_read = remaining_to_consume > sizeof(dummy) ? sizeof(dummy) : remaining_to_consume;
-            long consumed_bytes = recv(sock, dummy, to_read, 0);
+            size_t to_read = remaining_to_consume > sizeof(dummy) ? sizeof(dummy) : remaining_to_consume;
+            ssize_t consumed_bytes = recv(sock, dummy, to_read, 0);
             if (consumed_bytes <= 0) break;
             remaining_to_consume -= consumed_bytes;
         }
-        return;
+
+        if (drain_socket_unknown_size(sock, POLL_TIMEOUT) != 0) return PUSH_SOCK_ERROR;
+        return 0;
     }
 
     // Write the part of the file that was already received in the initial buffer
     long initial_content_len = bytes_read - (header_end + 1 - cmd);
     if (initial_content_len > 0) {
-        fwrite(header_end + 1, 1, initial_content_len, fp);
+        fwrite(header_end + 1, initial_content_len, 1, fp);
     }
 
     long remaining = file_size - initial_content_len;
     char buffer[4096];
 
+    printf("Remaining: %lu, br:%d\n", remaining, bytes_read);
+
     while (remaining > 0) {
+        printf("remaning: %lu \n", remaining);
         long to_read = remaining > sizeof(buffer) ? sizeof(buffer) : remaining;
+        printf("To read: %lu\n", to_read);
         long received_bytes = recv(sock, buffer, to_read, 0);
+        printf("Received bytes successfully %lu\n", received_bytes);
         if (received_bytes <= 0) {
             fprintf(stderr, "[!] Connection lost while receiving file.\n");
             break;
         }
-        fwrite(buffer, 1, received_bytes, fp);
+        fwrite(buffer, received_bytes, 1, fp);
         remaining -= received_bytes;
     }
 
+    printf("Exited while loop\n");
     fclose(fp);
 
     if (remaining == 0) {
         printf("[+] File received successfully.\n");
-    } else {
-        fprintf(stderr, "[!] File transfer incomplete.\n");
+        return 0;
     }
+
+    fprintf(stderr, "[!] File transfer incomplete.\n");
+    return PUSH_SOCK_ERROR;
 }
 
 void handle_signal(int sig) {
@@ -419,22 +490,27 @@ int main() {
                     break;
                 }
                 buffer[bytes] = '\0';
-                /* Clean newlines */
-                char *nl = strchr(buffer, '\n');
-                if (nl) *nl = '\0';
-                nl = strchr(buffer, '\r');
-                if (nl) *nl = '\0';
                 printf("[*] Command received: %s\n", buffer);
                 fflush(stdout);
 
                 if (strncmp(buffer, "PUSH|", 5) == 0) {
-                    handle_push_command(command_sock, buffer, bytes);
+                    printf("[*] PUSH TEST\n");
+                    print_hex(buffer, 150);
+                    printf("[*] END TEST\n");
+                    int push_res = handle_push_command(command_sock, buffer, bytes);
+                    if (push_res != 0)
+                    {
+                        if (drain_socket_unknown_size(command_sock, POLL_TIMEOUT) != 0)
+                        {
+                            perror("[ERROR:] SOCKET CLEANUP ERROR, SOCKET IS LEFT IN UNKOWN STATE. RESTARTING CONNECTION");
+                            break;
+                        }
+                    }
                     continue;
+                    printf("ERROR: THIS SHOULD BE UNREACHABLE\n");
                 }
 
                 if (strcasecmp(buffer, "EXIT") == 0) {
-                    // codice per uscire
-
                     printf("[*] Exit command received\n");
                     fflush(stdout);
                     send(command_sock, "Goodbye!", 8, MSG_NOSIGNAL);
