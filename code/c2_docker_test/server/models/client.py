@@ -4,15 +4,16 @@ import socket
 
 
 class Client:
-    def __init__(self, socket, address, hostname, last_seen,
+    def __init__(self, cmd_socket, stream_socket, address, hostname, last_seen,
                  unique_id=None, heartbeat_port=4445):
-        self.socket = socket
+        self.cmd_socket = cmd_socket
         self.address = address
-        self.ip, self.port = address
+        self.ip, self.cmd_port = address
         self.hostname = hostname
         self.last_seen = last_seen
         self.unique_id = unique_id
         self.heartbeat_port = heartbeat_port
+        self.stream_socket = stream_socket
         self.first_seen = time.time()
         self.note = ""
 
@@ -47,7 +48,7 @@ class Client:
             old_socket = self.socket
             self.socket = new_socket
             self.address = new_address
-            self.ip, self.port = new_address
+            self.ip, self.cmd_port = new_address
             if new_heartbeat_port is not None:
                 self.heartbeat_port = new_heartbeat_port
             self.active = True

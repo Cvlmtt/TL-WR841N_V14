@@ -191,6 +191,9 @@ class C2TUI(App):
         finally:
             self.update_status()
 
+    def action_do_stream(self) -> None:
+        self.server.client_stream(self.selected_uid)
+
     def action_refresh(self) -> None:
         self.refresh_client_list()
         self.log_widget.write("[i]Client list refreshed[/i]")
@@ -255,7 +258,7 @@ class C2TUI(App):
                     uid = c.unique_id
                     state = "A" if c.active else "I"
                     idle = int(now - c.last_seen)
-                    text = f"{uid[:8]}  {state}  {c.ip}:{c.port}  idle:{idle}s"
+                    text = f"{uid[:8]}  {state}  {c.ip}:{c.cmd_port}  idle:{idle}s"
                     items.append(ClientListItem(uid, text))
                     if c.active:
                         active_uids.add(uid)
@@ -317,7 +320,7 @@ class C2TUI(App):
             data = {
                 "unique_id": client.unique_id,
                 "ip": client.ip,
-                "port": client.port,
+                "port": client.cmd_port,
                 "active": client.active,
                 "last_seen": f"{int(now - client.last_seen)}s ago",
                 "first_seen": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(client.first_seen)),
@@ -395,6 +398,10 @@ class C2TUI(App):
         if raw == "clear":
             self.log_widget.clear()
             self.log_widget.write("Log cleared.")
+            return
+
+        if raw == "stream":
+            self.action_do_stream()
             return
 
         if raw.startswith("broadcast "):
