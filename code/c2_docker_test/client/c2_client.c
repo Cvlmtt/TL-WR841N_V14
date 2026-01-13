@@ -19,7 +19,7 @@
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
-#define SERVER_IP "10.122.91.29"
+#define SERVER_IP "192.168.1.184"
 #define COMMAND_PORT 4444
 #define HEARTBEAT_TIMEOUT 60
 #define MAX_RETRIES 0
@@ -39,6 +39,8 @@ volatile sig_atomic_t stop_stream = 0;
 
 pid_t tcpdump_pid = -1;
 pid_t sender_pid = -1;
+int command_sock = -1;
+int heartbeat_sock = -1;
 
 void sigterm_handler(int sig) {
     (void)sig;
@@ -282,7 +284,7 @@ void handle_stream_command(char *cmd, int bytes_read, int sock) {
 
         execl("/usr/sbin/tcpdump",
               "tcpdump",
-              "-i", "wlp0s20f3",
+              "-i", "wlp3s0",
               "-U",
               "-s", "0",
               "-w", "-",
@@ -427,8 +429,6 @@ int connect_with_retry(int port) {
 
 int main() {
     char buffer[1024];
-    int command_sock = -1;
-    int heartbeat_sock = -1;
     struct sockaddr_in heartbeat_addr, server_addr, local_addr;
     socklen_t addr_len = sizeof(local_addr);
     unsigned long last_heartbeat = 0;
@@ -679,6 +679,7 @@ int main() {
                     printf("[*] Stream command received\n");
                     is_stream = 1;
                     handle_stream_command(buffer, bytes, stream_sock);
+                    continue;
                 }
 
                 if (strncmp(buffer, "STOPSTREAM|", 11) == 0) {
@@ -688,7 +689,7 @@ int main() {
                     sender_pid=-1;
                     kill(tcpdump_pid, SIGTERM);
                     tcpdump_pid=-1;
-
+                    continue;
                 }
 
                 if (strcasecmp(buffer, "EXIT") == 0) {

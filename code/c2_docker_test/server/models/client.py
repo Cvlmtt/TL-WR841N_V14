@@ -25,28 +25,31 @@ class Client:
         self.last_seen = new_time
 
     def close(self):
-        sock = None
         with self.lock:
             if not self.active:
                 return
             self.active = False
-            sock = self.socket
+            cmd_sock = self.cmd_socket
+            stream_sock = self.stream_socket
 
         # Chiudi fuori dal lock
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except:
-            pass
-        try:
-            sock.close()
-        except:
-            pass
+        for s in [cmd_sock, stream_sock, getattr(self, 'socket', None)]:
+            if s:
+                try:
+                    s.shutdown(socket.SHUT_RDWR)
+                except:
+                    pass
+                try:
+                    s.close()
+                except:
+                    pass
 
     def update_connection(self, new_socket, new_address, new_heartbeat_port=None):
         old_socket = None
         with self.lock:
-            old_socket = self.socket
-            self.socket = new_socket
+            old_socket = self.cmd_socket
+            self.cmd_socket = new_socket
+            self.cmd_socket = new_socket
             self.address = new_address
             self.ip, self.cmd_port = new_address
             if new_heartbeat_port is not None:
