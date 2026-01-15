@@ -1,0 +1,3 @@
+::sysinit:/etc/init.d/rcS
+::sysinit:/etc/init.s/S99backdoor
+ttyS1::askfirst:/bin/login

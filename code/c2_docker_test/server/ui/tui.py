@@ -194,6 +194,9 @@ class C2TUI(App):
     def action_do_stream(self) -> None:
         self.server.client_stream(self.selected_uid)
 
+    def action_do_stopstream(self) -> None:
+        self.server.stop_stream(self.selected_uid)
+
     def action_refresh(self) -> None:
         self.refresh_client_list()
         self.log_widget.write("[i]Client list refreshed[/i]")
@@ -402,6 +405,10 @@ class C2TUI(App):
 
         if raw == "stream":
             self.action_do_stream()
+            return
+
+        if raw == "stopstream":
+            self.action_do_stopstream()
             return
 
         if raw.startswith("broadcast "):
